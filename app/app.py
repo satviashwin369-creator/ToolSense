@@ -2,10 +2,10 @@
 from pathlib import Path
 import json
 import math
+import os
 
 import joblib
 import numpy as np
-import pandas as pd
 from scipy.io import loadmat
 from scipy.stats import skew, kurtosis
 from flask import Flask, jsonify, request
@@ -49,15 +49,35 @@ SHAPE_STATS = ["skewness", "kurtosis"]
 
 
 # ---------------------------------------------------------------------
-# Local-development CORS configuration
+# CORS configuration
+#
+# Local development is allowed automatically.
+# For deployment, set FRONTEND_ORIGIN to your frontend's exact URL.
+# Example: https://toolsense-frontend.vercel.app
 # ---------------------------------------------------------------------
+def allowed_origins():
+    origins = {"http://localhost:5173"}
+
+    configured_origin = os.environ.get("FRONTEND_ORIGIN", "").strip()
+    if configured_origin:
+        origins.add(configured_origin.rstrip("/"))
+
+    return origins
+
+
 @app.after_request
 def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = (
-        "http://localhost:5173"
-    )
+    origin = request.headers.get("Origin", "").rstrip("/")
+
+    if origin and origin in allowed_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = (
+        "GET, POST, OPTIONS"
+    )
+
     return response
 
 
@@ -67,7 +87,8 @@ def add_cors_headers(response):
 if not MODEL_PATH.exists():
     raise FileNotFoundError(
         f"Candidate model not found at {MODEL_PATH}. "
-        "Run src/train_candidate_model.py first."
+        "Ensure models/toolsense_model_candidate.joblib is included "
+        "in the deployment."
     )
 
 saved_artifact = joblib.load(MODEL_PATH)
@@ -86,8 +107,6 @@ if len(FEATURES) != 50:
         f"Expected the 50-feature candidate model, found {len(FEATURES)}."
     )
 
-# Validate the feature names used by the sample extractor against
-# the exact ordered feature list stored in the trained model.
 EXPECTED_FEATURES = [
     f"{sensor}_{stat}"
     for sensor in SENSORS
@@ -110,6 +129,7 @@ print(f"Model: {MODEL_NAME}")
 print(f"Features: {len(FEATURES)}")
 print(f"Raw dataset: {MAT_PATH}")
 print(f"Artifact: {MODEL_PATH}")
+print(f"Raw dataset available: {MAT_PATH.exists()}")
 print("=" * 64)
 
 
@@ -117,10 +137,11 @@ print("=" * 64)
 # Load raw dataset records
 # ---------------------------------------------------------------------
 def load_raw_records():
-    """Load the original milling records from mill.mat."""
+    """Load original milling records from mill.mat."""
     if not MAT_PATH.exists():
         raise FileNotFoundError(
-            f"Raw dataset not found: {MAT_PATH}"
+            "The original mill.mat dataset is not included in this "
+            "deployment. The sample endpoint is unavailable."
         )
 
     try:
@@ -137,9 +158,12 @@ def scalar_from_record(record, field):
     """Read a scalar MATLAB struct field safely."""
     try:
         value = np.asarray(record[field]).squeeze()
+
         if value.size != 1:
             raise ValueError(f"{field} is not a scalar.")
+
         return float(value)
+
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(
             f"Could not read field '{field}' from the raw record."
@@ -209,7 +233,7 @@ def extract_record_features(record):
         result[f"{sensor}_skewness"] = skewness_value
         result[f"{sensor}_kurtosis"] = kurtosis_value
 
-    # These values are read from the actual dataset record.
+    # Read machining conditions from the actual dataset record.
     result["DOC"] = scalar_from_record(record, "DOC")
     result["feed"] = scalar_from_record(record, "feed")
 
@@ -218,7 +242,9 @@ def extract_record_features(record):
             f"Expected 50 extracted features, got {len(result)}."
         )
 
-    missing = [feature for feature in FEATURES if feature not in result]
+    missing = [
+        feature for feature in FEATURES if feature not in result
+    ]
 
     if missing:
         raise ValueError(
@@ -274,6 +300,7 @@ def metrics():
         with open(METRICS_PATH, "r", encoding="utf-8") as file:
             saved_metrics = json.load(file)
     except (OSError, json.JSONDecodeError) as error:
+        app.logger.exception("Could not read candidate model metrics.")
         return jsonify({
             "error": "Could not read candidate model metrics.",
             "details": str(error),
@@ -284,14 +311,27 @@ def metrics():
 
 # ---------------------------------------------------------------------
 # Real dataset sample endpoint
-# Returns one measured record with all 50 real extracted features.
+#
+# If mill.mat is absent in a deployment, return a clear 503 response.
+# Never fabricate sample features or replace missing wear with zero.
 # ---------------------------------------------------------------------
 @app.get("/api/sample")
 def sample():
+    if not MAT_PATH.exists():
+        return jsonify({
+            "error": "Sample data is unavailable on this deployment.",
+            "detail": (
+                "The original mill.mat dataset is not included. "
+                "The model prediction endpoint remains available "
+                "when valid features are supplied."
+            ),
+            "sample_endpoint_available": False,
+        }), 503
+
     try:
         records = load_raw_records()
 
-        # Prefer a record with a measured wear value, if available.
+        # Prefer a record with a measured wear value.
         # Do not replace missing wear labels with zero.
         measured_record = None
 
@@ -401,9 +441,7 @@ def predict():
     try:
         prediction = float(model.predict(input_data)[0])
     except Exception:
-        app.logger.exception(
-            "Candidate-model prediction failed."
-        )
+        app.logger.exception("Candidate-model prediction failed.")
         return jsonify({
             "error": (
                 "The model could not process the supplied features."

@@ -1,0 +1,8 @@
+﻿{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "app/app.py": {
+      "includeFiles": "{models/toolsense_model_candidate.joblib,reports/candidate_model_metrics.json}"
+    }
+  }
+}
