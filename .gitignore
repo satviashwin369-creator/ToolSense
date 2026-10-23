@@ -1,0 +1,36 @@
+﻿# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Frontend dependencies and production build
+frontend/node_modules/
+frontend/dist/
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+
+# Large original dataset (keep locally)
+data/raw/mill.mat
+
+# Superseded baseline model (keep locally)
+models/toolsense_model.joblib

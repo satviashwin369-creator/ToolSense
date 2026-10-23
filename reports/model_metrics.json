@@ -1,0 +1,14 @@
+{
+    "sensors_plus_DOC_feed": {
+        "feature_count": 38,
+        "MAE_mm": 0.14480300379034974,
+        "RMSE_mm": 0.21938428385041234,
+        "R2": 0.2860189984980286
+    },
+    "sensors_plus_all_conditions": {
+        "feature_count": 39,
+        "MAE_mm": 0.14494192900136396,
+        "RMSE_mm": 0.21992416246762062,
+        "R2": 0.28250063010434756
+    }
+}

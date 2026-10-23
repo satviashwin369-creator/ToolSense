@@ -1,0 +1,3 @@
+Model,Feature_count,MAE_mm,RMSE_mm,R2,High_wear_count,High_wear_MAE_mm,High_wear_signed_error_mm,Result_type,Fold,Train_cases,Test_cases,Test_records
+Extra Trees - Original,38,0.1343774685807676,0.20464047256720636,0.3787610305246457,28,0.2762000123620145,0.24983612347312564,Overall OOF,,,,
+Extra Trees - Log1p target,38,0.13068083666328575,0.20243876031050262,0.39205685086512376,28,0.28199167650996404,0.26207005868755334,Overall OOF,,,,

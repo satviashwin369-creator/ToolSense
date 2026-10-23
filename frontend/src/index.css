@@ -1,0 +1,121 @@
+
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  font-family: "DM Sans", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  --bg: #0c1016;
+  --sidebar: #0e131b;
+  --header: #0e131b;
+  --surface: #121923;
+  --table-head: #19222e;
+  --border: #252f3c;
+  --border-strong: #3a4a5d;
+  --text: #e8edf4;
+  --muted: #8b9aaf;
+  --accent: #45cde0;
+  --accent-soft: #45cde012;
+  --accent-border: #45cde032;
+  --track: #27313e;
+  --warning: #f2bb69;
+  --warning-soft: #f2bb6910;
+  --warning-border: #f2bb6930;
+  --success: #4fd4a1;
+  --success-soft: #4fd4a115;
+}
+
+:root[data-theme="light"] {
+  --bg: #f2f5f9;
+  --sidebar: #ffffff;
+  --header: #ffffff;
+  --surface: #ffffff;
+  --table-head: #f2f6fa;
+  --border: #e0e6ee;
+  --border-strong: #c4cfdd;
+  --text: #172435;
+  --muted: #687b91;
+  --accent: #087f9c;
+  --accent-soft: #087f9c0d;
+  --accent-border: #087f9c30;
+  --track: #e1e8f0;
+  --warning: #986016;
+  --warning-soft: #fff7e8;
+  --warning-border: #f0d8a7;
+  --success: #13875f;
+  --success-soft: #e9f8f1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--bg);
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+body,
+button,
+input,
+select,
+textarea {
+  font-family: "DM Sans", sans-serif;
+}
+
+button {
+  font: inherit;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+::selection {
+  background: var(--accent);
+  color: #06151b;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+
+/* ToolSense: improve text rendering and prevent accidental scaling */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+/* Keep chart canvases crisp and correctly sized */
+canvas {
+  max-width: 100%;
+}
+
