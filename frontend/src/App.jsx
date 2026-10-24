@@ -23,7 +23,7 @@ ChartJS.register(
   Legend
 );
 
-const API = "http://127.0.0.1:5000/api";
+const API = "https://toolsense-backend.vercel.app/api";
 const REPORTS = "/reports";
 
 const SENSOR_GROUPS = [
