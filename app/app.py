@@ -1,31 +1,29 @@
 
-from pathlib import Path
 import json
 import math
 import os
+from pathlib import Path
 
 import joblib
 import numpy as np
-from scipy.io import loadmat
-from scipy.stats import skew, kurtosis
 from flask import Flask, jsonify, request
+from scipy.io import loadmat
+from scipy.stats import kurtosis, skew
 
 
-# ---------------------------------------------------------------------
-# Project paths
-# ---------------------------------------------------------------------
+# --------------------------------------------------
+# Paths and configuration
+# --------------------------------------------------
+
 ROOT = Path(__file__).resolve().parent.parent
 
 MODEL_PATH = ROOT / "models" / "toolsense_model_candidate.joblib"
 METRICS_PATH = ROOT / "reports" / "candidate_model_metrics.json"
 MAT_PATH = ROOT / "data" / "raw" / "mill.mat"
+SAMPLE_PATH = ROOT / "data" / "processed" / "deployment_sample.json"
 
-app = Flask(__name__)
-
-MODEL_NAME = "ExtraTreesRegressor"
-TARGET_NAME = "VB"
-TARGET_UNIT = "mm"
-WEAR_THRESHOLD_MM = 0.5
+EXPECTED_FEATURE_COUNT = 50
+HIGH_WEAR_THRESHOLD_MM = 0.5
 
 SENSORS = [
     "smcAC",
@@ -36,29 +34,22 @@ SENSORS = [
     "AE_spindle",
 ]
 
-BASE_STATS = [
-    "mean",
-    "std",
-    "rms",
-    "minimum",
-    "maximum",
-    "peak_to_peak",
+BASE_STATISTICS = [
+    "mean", "std", "rms", "minimum", "maximum", "peak_to_peak"
 ]
+SHAPE_STATISTICS = ["skewness", "kurtosis"]
 
-SHAPE_STATS = ["skewness", "kurtosis"]
+app = Flask(__name__)
 
 
-# ---------------------------------------------------------------------
-# CORS configuration
-#
-# Local development is allowed automatically.
-# For deployment, set FRONTEND_ORIGIN to your frontend's exact URL.
-# Example: https://toolsense-frontend.vercel.app
-# ---------------------------------------------------------------------
+# --------------------------------------------------
+# CORS
+# --------------------------------------------------
+
 def allowed_origins():
     origins = {"http://localhost:5173"}
-
     configured_origin = os.environ.get("FRONTEND_ORIGIN", "").strip()
+
     if configured_origin:
         origins.add(configured_origin.rstrip("/"))
 
@@ -74,398 +65,346 @@ def add_cors_headers(response):
         response.headers["Vary"] = "Origin"
 
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = (
-        "GET, POST, OPTIONS"
-    )
-
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
 
-# ---------------------------------------------------------------------
-# Load and verify the candidate model
-# ---------------------------------------------------------------------
-if not MODEL_PATH.exists():
-    raise FileNotFoundError(
-        f"Candidate model not found at {MODEL_PATH}. "
-        "Ensure models/toolsense_model_candidate.joblib is included "
-        "in the deployment."
-    )
-
-saved_artifact = joblib.load(MODEL_PATH)
-
-model = saved_artifact["model"]
-FEATURES = saved_artifact["features"]
-
-if len(FEATURES) != model.n_features_in_:
-    raise ValueError(
-        f"Artifact mismatch: {len(FEATURES)} feature names but "
-        f"the model expects {model.n_features_in_} features."
-    )
-
-if len(FEATURES) != 50:
-    raise ValueError(
-        f"Expected the 50-feature candidate model, found {len(FEATURES)}."
-    )
-
-EXPECTED_FEATURES = [
-    f"{sensor}_{stat}"
-    for sensor in SENSORS
-    for stat in BASE_STATS
-] + [
-    f"{sensor}_{stat}"
-    for sensor in SENSORS
-    for stat in SHAPE_STATS
-] + ["DOC", "feed"]
-
-if FEATURES != EXPECTED_FEATURES:
-    raise ValueError(
-        "The model's feature order does not match the expected "
-        "50-feature definition. Check the saved training artifact."
-    )
-
-print("=" * 64)
-print("ToolSense backend")
-print(f"Model: {MODEL_NAME}")
-print(f"Features: {len(FEATURES)}")
-print(f"Raw dataset: {MAT_PATH}")
-print(f"Artifact: {MODEL_PATH}")
-print(f"Raw dataset available: {MAT_PATH.exists()}")
-print("=" * 64)
+@app.route("/api", defaults={"unused": ""}, methods=["OPTIONS"])
+@app.route("/api/<path:unused>", methods=["OPTIONS"])
+def api_preflight(unused):
+    return "", 204
 
 
-# ---------------------------------------------------------------------
-# Load raw dataset records
-# ---------------------------------------------------------------------
-def load_raw_records():
-    """Load original milling records from mill.mat."""
-    if not MAT_PATH.exists():
-        raise FileNotFoundError(
-            "The original mill.mat dataset is not included in this "
-            "deployment. The sample endpoint is unavailable."
+# --------------------------------------------------
+# Model loading
+# --------------------------------------------------
+
+model = None
+FEATURES = []
+MODEL_ARTIFACT = None
+MODEL_LOAD_ERROR = None
+
+try:
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"Model artifact not found: {MODEL_PATH}")
+
+    MODEL_ARTIFACT = joblib.load(MODEL_PATH)
+    model = MODEL_ARTIFACT["model"]
+    FEATURES = list(MODEL_ARTIFACT["features"])
+
+    if len(FEATURES) != EXPECTED_FEATURE_COUNT:
+        raise ValueError(
+            f"Expected 50 features; artifact contains {len(FEATURES)}."
         )
 
-    try:
-        records = loadmat(MAT_PATH)["mill"].ravel()
-    except (OSError, KeyError, ValueError) as error:
-        raise RuntimeError(
-            f"Could not read the milling dataset: {error}"
-        ) from error
+    if getattr(model, "n_features_in_", None) != EXPECTED_FEATURE_COUNT:
+        raise ValueError("The model does not expect 50 input features.")
 
-    return records
+except Exception as exc:
+    model = None
+    FEATURES = []
+    MODEL_LOAD_ERROR = str(exc)
 
+
+# --------------------------------------------------
+# Dataset and feature utilities
+# --------------------------------------------------
 
 def scalar_from_record(record, field):
-    """Read a scalar MATLAB struct field safely."""
     try:
         value = np.asarray(record[field]).squeeze()
 
-        if value.size != 1:
-            raise ValueError(f"{field} is not a scalar.")
+        if value.size == 0:
+            raise ValueError("Empty field")
 
-        return float(value)
+        return float(value.reshape(-1)[0])
 
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(
-            f"Could not read field '{field}' from the raw record."
-        ) from error
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise ValueError(f"Could not read scalar field '{field}'.") from exc
 
 
-def extract_record_features(record):
-    """
-    Extract the same 50 features and in the same order as training.
+def signal_from_record(record, field):
+    try:
+        signal = np.asarray(
+            record[field], dtype=np.float64
+        ).squeeze().reshape(-1)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Could not read sensor field '{field}'.") from exc
 
-    Base statistics:
-      mean, std, RMS, minimum, maximum, peak-to-peak
+    if signal.size == 0 or not np.isfinite(signal).all():
+        raise ValueError(f"Sensor signal '{field}' is empty or non-finite.")
 
-    Shape statistics:
-      scipy skew(bias=False)
-      scipy kurtosis(fisher=True, bias=False)
-    """
-    result = {}
+    return signal
 
-    for sensor in SENSORS:
-        try:
-            signal = np.asarray(
-                record[sensor], dtype=float
-            ).ravel()
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError(
-                f"Could not read sensor '{sensor}'."
-            ) from error
 
-        if signal.size == 0 or not np.isfinite(signal).all():
-            raise ValueError(
-                f"Invalid {sensor} signal in the selected record."
-            )
+def calculate_signal_features(signal):
+    signal = np.asarray(signal, dtype=np.float64).reshape(-1)
 
-        # These definitions match src/train_candidate_model.py.
-        result[f"{sensor}_mean"] = float(np.mean(signal))
-        result[f"{sensor}_std"] = float(np.std(signal))
-        result[f"{sensor}_rms"] = float(
-            np.sqrt(np.mean(signal ** 2))
-        )
-        result[f"{sensor}_minimum"] = float(np.min(signal))
-        result[f"{sensor}_maximum"] = float(np.max(signal))
-        result[f"{sensor}_peak_to_peak"] = float(np.ptp(signal))
+    if signal.size == 0 or not np.isfinite(signal).all():
+        raise ValueError("Signal must contain finite numeric values.")
 
-        if np.std(signal) == 0:
-            skewness_value = 0.0
-            kurtosis_value = 0.0
-        else:
-            skewness_value = (
-                float(skew(signal, bias=False))
-                if signal.size >= 3
-                else 0.0
-            )
+    result = {
+        "mean": float(np.mean(signal)),
+        "std": float(np.std(signal)),
+        "rms": float(np.sqrt(np.mean(np.square(signal)))),
+        "minimum": float(np.min(signal)),
+        "maximum": float(np.max(signal)),
+        "peak_to_peak": float(np.ptp(signal)),
+        "skewness": float(skew(signal)),
+        "kurtosis": float(kurtosis(signal)),
+    }
 
-            kurtosis_value = (
-                float(
-                    kurtosis(
-                        signal,
-                        fisher=True,
-                        bias=False,
-                    )
-                )
-                if signal.size >= 4
-                else 0.0
-            )
-
-        result[f"{sensor}_skewness"] = skewness_value
-        result[f"{sensor}_kurtosis"] = kurtosis_value
-
-    # Read machining conditions from the actual dataset record.
-    result["DOC"] = scalar_from_record(record, "DOC")
-    result["feed"] = scalar_from_record(record, "feed")
-
-    if len(result) != 50:
-        raise ValueError(
-            f"Expected 50 extracted features, got {len(result)}."
-        )
-
-    missing = [
-        feature for feature in FEATURES if feature not in result
-    ]
-
-    if missing:
-        raise ValueError(
-            f"Feature extraction omitted required fields: {missing}"
-        )
-
-    for feature in FEATURES:
-        if not math.isfinite(result[feature]):
-            raise ValueError(
-                f"Feature '{feature}' is not finite."
-            )
+    if not all(math.isfinite(value) for value in result.values()):
+        raise ValueError("Calculated signal statistics are non-finite.")
 
     return result
 
 
-# ---------------------------------------------------------------------
-# Health endpoint
-# ---------------------------------------------------------------------
-@app.get("/api/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "project": "ToolSense",
-        "model_loaded": model is not None,
-        "model_name": MODEL_NAME,
-        "expected_features": len(FEATURES),
-        "target": TARGET_NAME,
-        "target_unit": TARGET_UNIT,
-        "feature_definition": saved_artifact.get(
-            "feature_definition",
-            "50 sensor and machining-condition features",
-        ),
-        "validation": saved_artifact.get("validation"),
-        "sample_endpoint_available": MAT_PATH.exists(),
+def extract_features(record):
+    features = {}
+
+    for sensor in SENSORS:
+        statistics = calculate_signal_features(
+            signal_from_record(record, sensor)
+        )
+
+        for name in BASE_STATISTICS + SHAPE_STATISTICS:
+            features[f"{sensor}_{name}"] = statistics[name]
+
+    features["DOC"] = scalar_from_record(record, "DOC")
+    features["feed"] = scalar_from_record(record, "feed")
+
+    if len(features) != EXPECTED_FEATURE_COUNT:
+        raise ValueError(f"Expected 50 features; got {len(features)}.")
+
+    return features
+
+
+def load_raw_records():
+    if not MAT_PATH.exists():
+        raise FileNotFoundError("The original mill.mat dataset is not included.")
+
+    try:
+        return loadmat(MAT_PATH)["mill"].ravel()
+    except (OSError, KeyError, ValueError) as exc:
+        raise RuntimeError(f"Could not read milling dataset: {exc}") from exc
+
+
+def make_sample_response(record):
+    features = extract_features(record)
+
+    return {
+        "case": int(scalar_from_record(record, "case")),
+        "run": int(scalar_from_record(record, "run")),
+        "feature_count": len(features),
+        "features": features,
+        "measured_VB_mm": scalar_from_record(record, "VB"),
         "notice": (
-            "Research prototype. Predictions are not certified "
-            "industrial safety decisions."
+            "Features were calculated from the original sensor signals. "
+            "Measured VB is reference information, not an input feature."
         ),
-    })
+        "source": "data/raw/mill.mat",
+    }
 
 
-# ---------------------------------------------------------------------
-# Candidate-model evaluation metrics
-# ---------------------------------------------------------------------
-@app.get("/api/metrics")
+def load_saved_deployment_sample():
+    if not SAMPLE_PATH.exists():
+        raise FileNotFoundError("The saved deployment sample is unavailable.")
+
+    try:
+        sample = json.loads(SAMPLE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read deployment sample: {exc}") from exc
+
+    features = sample.get("features")
+
+    if not isinstance(features, dict) or len(features) != EXPECTED_FEATURE_COUNT:
+        raise ValueError("Saved sample must contain exactly 50 features.")
+
+    if FEATURES and set(features) != set(FEATURES):
+        raise ValueError("Saved sample feature names do not match the model.")
+
+    for name, value in features.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"Feature '{name}' must be a number.")
+
+        if not math.isfinite(value):
+            raise ValueError(f"Feature '{name}' must be finite.")
+
+    sample["feature_count"] = len(features)
+    return sample
+
+
+# --------------------------------------------------
+# Health
+# --------------------------------------------------
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    loaded = model is not None
+
+    return jsonify({
+        "status": "ok" if loaded else "error",
+        "model_loaded": loaded,
+        "model_name": type(model).__name__ if loaded else None,
+        "expected_features": len(FEATURES),
+        "feature_definition": (
+            "36 sensor statistics + 12 signal shape statistics + DOC + feed"
+        ),
+        "target": "VB",
+        "target_unit": "mm",
+        "validation": "GroupKFold",
+        "sample_endpoint_available": MAT_PATH.exists() or SAMPLE_PATH.exists(),
+        "error": MODEL_LOAD_ERROR,
+    }), (200 if loaded else 500)
+
+
+# --------------------------------------------------
+# Metrics
+# --------------------------------------------------
+
+@app.route("/api/metrics", methods=["GET"])
 def metrics():
     if not METRICS_PATH.exists():
-        return jsonify({
-            "error": "Candidate model metrics file not found."
-        }), 404
+        return jsonify({"error": "Model metrics file is unavailable."}), 503
 
     try:
-        with open(METRICS_PATH, "r", encoding="utf-8") as file:
-            saved_metrics = json.load(file)
-    except (OSError, json.JSONDecodeError) as error:
-        app.logger.exception("Could not read candidate model metrics.")
-        return jsonify({
-            "error": "Could not read candidate model metrics.",
-            "details": str(error),
-        }), 500
-
-    return jsonify(saved_metrics)
+        data = json.loads(METRICS_PATH.read_text(encoding="utf-8"))
+        return jsonify(data), 200
+    except (OSError, json.JSONDecodeError) as exc:
+        return jsonify({"error": f"Could not load metrics: {exc}"}), 500
 
 
-# ---------------------------------------------------------------------
-# Real dataset sample endpoint
-#
-# If mill.mat is absent in a deployment, return a clear 503 response.
-# Never fabricate sample features or replace missing wear with zero.
-# ---------------------------------------------------------------------
-@app.get("/api/sample")
+# --------------------------------------------------
+# Sample
+# --------------------------------------------------
+
+@app.route("/api/sample", methods=["GET"])
 def sample():
-    if not MAT_PATH.exists():
+    if MAT_PATH.exists():
+        try:
+            for record in load_raw_records():
+                case_number = int(scalar_from_record(record, "case"))
+                run_number = int(scalar_from_record(record, "run"))
+
+                if case_number == 1 and run_number == 1:
+                    return jsonify(make_sample_response(record)), 200
+
+            return jsonify({"error": "Case 1, Run 1 was not found."}), 404
+
+        except Exception as exc:
+            app.logger.exception("Could not load sample from mill.mat")
+            return jsonify({
+                "error": "Could not load sample from original dataset.",
+                "detail": str(exc),
+            }), 500
+
+    try:
+        return jsonify(load_saved_deployment_sample()), 200
+    except FileNotFoundError as exc:
         return jsonify({
             "error": "Sample data is unavailable on this deployment.",
-            "detail": (
-                "The original mill.mat dataset is not included. "
-                "The model prediction endpoint remains available "
-                "when valid features are supplied."
-            ),
+            "detail": str(exc),
             "sample_endpoint_available": False,
         }), 503
-
-    try:
-        records = load_raw_records()
-
-        # Prefer a record with a measured wear value.
-        # Do not replace missing wear labels with zero.
-        measured_record = None
-
-        for record in records:
-            try:
-                vb = scalar_from_record(record, "VB")
-            except ValueError:
-                continue
-
-            if math.isfinite(vb):
-                measured_record = record
-                break
-
-        if measured_record is None:
-            return jsonify({
-                "error": (
-                    "No record with a valid measured VB value "
-                    "was found in the raw dataset."
-                )
-            }), 404
-
-        features = extract_record_features(measured_record)
-
-        case_id = int(scalar_from_record(measured_record, "case"))
-        run_id = int(scalar_from_record(measured_record, "run"))
-        measured_vb = scalar_from_record(measured_record, "VB")
-
+    except (RuntimeError, ValueError, OSError) as exc:
+        app.logger.exception("Could not load saved deployment sample")
         return jsonify({
-            "features": {
-                feature: features[feature]
-                for feature in FEATURES
-            },
-            "case": case_id,
-            "run": run_id,
-            "measured_VB_mm": measured_vb,
-            "feature_count": len(FEATURES),
-            "source": "data/raw/mill.mat",
-            "notice": (
-                "Features were calculated from the original sensor "
-                "signals. Measured VB is reference information, not "
-                "an input feature."
-            ),
-        })
-
-    except (OSError, RuntimeError, ValueError) as error:
-        app.logger.exception("Could not load a raw dataset sample.")
-        return jsonify({
-            "error": str(error)
+            "error": "The saved deployment sample could not be loaded.",
+            "detail": str(exc),
         }), 500
 
 
-# ---------------------------------------------------------------------
-# Wear prediction endpoint
-# Expects every named feature used during model training.
-# ---------------------------------------------------------------------
-@app.route("/api/predict", methods=["POST", "OPTIONS"])
+# --------------------------------------------------
+# Prediction
+# --------------------------------------------------
+
+@app.route("/api/predict", methods=["POST"])
 def predict():
-    if request.method == "OPTIONS":
-        return ("", 204)
+    if model is None:
+        return jsonify({
+            "error": "The ML model is not available.",
+            "detail": MODEL_LOAD_ERROR,
+        }), 503
 
     payload = request.get_json(silent=True)
 
     if not isinstance(payload, dict):
-        return jsonify({
-            "error": (
-                "Request body must be a JSON object containing features."
-            )
-        }), 400
+        return jsonify({"error": "Request body must be a JSON object."}), 400
 
-    missing = [
-        feature for feature in FEATURES
-        if feature not in payload
-    ]
+    values = payload.get("features", payload)
+
+    if not isinstance(values, dict):
+        return jsonify({"error": "'features' must be a JSON object."}), 400
+
+    missing = [name for name in FEATURES if name not in values]
 
     if missing:
         return jsonify({
-            "error": "Some required features are missing.",
+            "error": "Missing required model features.",
             "missing_features": missing,
             "missing_count": len(missing),
-            "expected_feature_count": len(FEATURES),
+            "expected_features": len(FEATURES),
         }), 400
 
-    values = {}
+    validated = []
 
-    for feature in FEATURES:
-        value = payload[feature]
+    for name in FEATURES:
+        value = values[name]
 
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-        ):
+        if isinstance(value, bool):
             return jsonify({
-                "error": f"Feature '{feature}' must be a number."
+                "error": f"Feature '{name}' must be a number."
             }), 400
 
-        if not math.isfinite(value):
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
             return jsonify({
-                "error": f"Feature '{feature}' must be finite."
+                "error": f"Feature '{name}' must be a number."
             }), 400
 
-        values[feature] = float(value)
+        if not math.isfinite(numeric_value):
+            return jsonify({
+                "error": f"Feature '{name}' must be finite."
+            }), 400
 
-    input_data = [
-        [values[feature] for feature in FEATURES]
-    ]
+        validated.append(numeric_value)
 
     try:
-        prediction = float(model.predict(input_data)[0])
-    except Exception:
-        app.logger.exception("Candidate-model prediction failed.")
+        prediction_value = float(
+            model.predict(np.asarray([validated], dtype=np.float64))[0]
+        )
+
+        if not math.isfinite(prediction_value):
+            raise ValueError("Model returned a non-finite prediction.")
+
         return jsonify({
-            "error": (
-                "The model could not process the supplied features."
-            )
+            "predicted_VB_mm": prediction_value,
+            "unit": "mm",
+            "model": type(model).__name__,
+            "feature_count": len(FEATURES),
+            "input_feature_count": len(validated),
+            "high_wear_threshold_mm": HIGH_WEAR_THRESHOLD_MM,
+            "high_wear": prediction_value >= HIGH_WEAR_THRESHOLD_MM,
+            "research_only": True,
+            "notice": (
+                "This is a research estimate, not a certified "
+                "tool-change recommendation."
+            ),
+        }), 200
+
+    except Exception as exc:
+        app.logger.exception("Prediction failed")
+        return jsonify({
+            "error": "Prediction failed.",
+            "detail": str(exc),
         }), 500
 
-    # Do not silently clip the raw model prediction.
-    return jsonify({
-        "predicted_VB_mm": round(prediction, 4),
-        "unit": TARGET_UNIT,
-        "model": MODEL_NAME,
-        "input_feature_count": len(FEATURES),
-        "high_wear_threshold_mm": WEAR_THRESHOLD_MM,
-        "research_only": True,
-        "notice": (
-            "Experimental wear estimate. It is not a certified "
-            "tool-change recommendation or machine-safety decision."
-        ),
-    })
 
+# --------------------------------------------------
+# Local development
+# --------------------------------------------------
 
 if __name__ == "__main__":
-    app.run(
-        host="127.0.0.1",
-        port=5000,
-        debug=True,
-    )
+    app.run(host="127.0.0.1", port=5000, debug=True)
