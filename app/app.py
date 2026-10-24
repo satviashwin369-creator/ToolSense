@@ -21,6 +21,7 @@ MODEL_PATH = ROOT / "models" / "toolsense_model_candidate.joblib"
 METRICS_PATH = ROOT / "reports" / "candidate_model_metrics.json"
 MAT_PATH = ROOT / "data" / "raw" / "mill.mat"
 SAMPLE_PATH = ROOT / "data" / "processed" / "deployment_sample.json"
+SAMPLES_PATH = ROOT / "data" / "processed" / "deployment_samples.json"
 
 EXPECTED_FEATURE_COUNT = 50
 HIGH_WEAR_THRESHOLD_MM = 0.5
@@ -235,6 +236,58 @@ def load_saved_deployment_sample():
     return sample
 
 
+def validate_deployment_sample(sample):
+    """Validate a single record loaded from deployment_samples.json."""
+    features = sample.get("features")
+
+    if not isinstance(features, dict) or len(features) != EXPECTED_FEATURE_COUNT:
+        raise ValueError("Sample must contain exactly 50 features.")
+
+    if FEATURES and set(features) != set(FEATURES):
+        raise ValueError("Sample feature names do not match the model.")
+
+    for name, value in features.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"Feature '{name}' must be a number.")
+        if not math.isfinite(value):
+            raise ValueError(f"Feature '{name}' must be finite.")
+
+    return True
+
+
+_cached_deployment_samples = None
+
+
+def load_saved_deployment_samples():
+    """Load and cache the multi-sample deployment file."""
+    global _cached_deployment_samples
+
+    if _cached_deployment_samples is not None:
+        return _cached_deployment_samples
+
+    if not SAMPLES_PATH.exists():
+        raise FileNotFoundError(
+            f"Multi-sample deployment file not found: {SAMPLES_PATH.name}"
+        )
+
+    try:
+        data = json.loads(SAMPLES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Could not read deployment samples: {exc}"
+        ) from exc
+
+    if not isinstance(data, list) or not data:
+        raise ValueError("deployment_samples.json must be a non-empty list.")
+
+    for sample in data:
+        validate_deployment_sample(sample)
+        sample["feature_count"] = len(sample["features"])
+
+    _cached_deployment_samples = data
+    return data
+
+
 # --------------------------------------------------
 # Health
 # --------------------------------------------------
@@ -279,8 +332,43 @@ def metrics():
 # Sample
 # --------------------------------------------------
 
+@app.route("/api/samples", methods=["GET"])
+def samples_list():
+    """Return metadata for all available deployment samples."""
+    try:
+        all_samples = load_saved_deployment_samples()
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        app.logger.exception("Could not load deployment samples")
+        return jsonify({
+            "error": "Sample data is unavailable.",
+            "detail": str(exc),
+        }), 503
+
+    records = []
+    for s in all_samples:
+        records.append({
+            "case": s["case"],
+            "run": s["run"],
+            "measured_VB_mm": s["measured_VB_mm"],
+            "has_measured_wear": s["measured_VB_mm"] is not None,
+        })
+
+    return jsonify({
+        "count": len(records),
+        "records": records,
+    }), 200
+
+
 @app.route("/api/sample", methods=["GET"])
 def sample():
+    # Support case/run query parameters for specific record selection
+    requested_case = request.args.get("case")
+    requested_run = request.args.get("run")
+
+    if requested_case is not None or requested_run is not None:
+        return _get_selected_sample(requested_case, requested_run)
+
+    # Original default behaviour: return case 1, run 1
     if MAT_PATH.exists():
         try:
             for record in load_raw_records():
@@ -313,6 +401,62 @@ def sample():
             "error": "The saved deployment sample could not be loaded.",
             "detail": str(exc),
         }), 500
+
+
+def _get_selected_sample(raw_case, raw_run):
+    """Return a specific sample identified by case and run."""
+    # Validate parameters
+    if raw_case is None or raw_run is None:
+        return jsonify({
+            "error": "Both 'case' and 'run' query parameters are required.",
+        }), 400
+
+    try:
+        target_case = int(raw_case)
+        target_run = int(raw_run)
+    except (ValueError, TypeError):
+        return jsonify({
+            "error": "'case' and 'run' must be integers.",
+        }), 400
+
+    # Try deployment samples first (works on Vercel)
+    try:
+        all_samples = load_saved_deployment_samples()
+        for s in all_samples:
+            if s["case"] == target_case and s["run"] == target_run:
+                return jsonify(s), 200
+
+        return jsonify({
+            "error": f"No record found for case {target_case}, run {target_run}.",
+        }), 404
+
+    except (FileNotFoundError, RuntimeError, ValueError):
+        pass  # Fall through to raw dataset
+
+    # Fall back to raw dataset extraction
+    if MAT_PATH.exists():
+        try:
+            for record in load_raw_records():
+                case_number = int(scalar_from_record(record, "case"))
+                run_number = int(scalar_from_record(record, "run"))
+
+                if case_number == target_case and run_number == target_run:
+                    return jsonify(make_sample_response(record)), 200
+
+            return jsonify({
+                "error": f"No record found for case {target_case}, run {target_run}.",
+            }), 404
+
+        except Exception as exc:
+            app.logger.exception("Could not load sample from mill.mat")
+            return jsonify({
+                "error": "Could not load sample from original dataset.",
+                "detail": str(exc),
+            }), 500
+
+    return jsonify({
+        "error": "Sample data is unavailable on this deployment.",
+    }), 503
 
 
 # --------------------------------------------------

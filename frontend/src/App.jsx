@@ -1134,19 +1134,102 @@ function WearPrediction({ health }) {
   const [form, setForm] = useState(() =>
     Object.fromEntries(FEATURES.map((feature) => [feature, ""]))
   );
+  const [samples, setSamples] = useState([]);
+  const [loadingSamples, setLoadingSamples] = useState(false);
+  const [samplesError, setSamplesError] = useState("");
+  const [selectedKey, setSelectedKey] = useState("");
+  const [selectedRecord, setSelectedRecord] = useState(null);
   const [loadingSample, setLoadingSample] = useState(false);
   const [sampleMessage, setSampleMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
 
+  useEffect(() => {
+    let active = true;
+    async function fetchSamplesList() {
+      setLoadingSamples(true);
+      setSamplesError("");
+      try {
+        const response = await fetch(`${API}/samples`);
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "Failed to load dataset samples list.");
+        }
+        if (active) {
+          setSamples(Array.isArray(data.records) ? data.records : []);
+        }
+      } catch (err) {
+        if (active) {
+          setSamplesError(err.message || "Failed to load sample options.");
+        }
+      } finally {
+        if (active) {
+          setLoadingSamples(false);
+        }
+      }
+    }
+    fetchSamplesList();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   function updateField(name, value) {
     setForm((current) => ({ ...current, [name]: value }));
     setResult(null);
     setError("");
+    if (selectedRecord) {
+      setSelectedRecord(null);
+      setSelectedKey("");
+      setSampleMessage("Manual feature adjustments made.");
+    }
   }
 
-  async function loadSample() {
+  async function loadSampleByCaseRun(caseNum, runNum) {
+    setLoadingSample(true);
+    setError("");
+    setResult(null);
+    setSampleMessage("");
+
+    try {
+      const response = await fetch(`${API}/sample?case=${caseNum}&run=${runNum}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || `Could not load sample for Case ${caseNum} Run ${runNum}.`);
+      }
+      if (!data.features || data.feature_count !== 50) {
+        throw new Error("The API did not return the expected 50 features.");
+      }
+
+      setForm(
+        Object.fromEntries(
+          FEATURES.map((feature) => [feature, String(data.features[feature] ?? "")])
+        )
+      );
+      const hasVB = Number.isFinite(data.measured_VB_mm);
+      setSelectedRecord({
+        case: data.case,
+        run: data.run,
+        measured_VB_mm: data.measured_VB_mm,
+        has_measured_wear: hasVB,
+      });
+      setSelectedKey(`${data.case}-${data.run}`);
+      setSampleMessage(
+        `Loaded real sensor features · Case ${data.case} · Run ${data.run}` +
+          (hasVB
+            ? ` · Measured VB ${Number(data.measured_VB_mm).toFixed(3)} mm`
+            : " · Unlabelled (no measured wear)")
+      );
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      setLoadingSample(false);
+    }
+  }
+
+  async function loadDefaultSample() {
     setLoadingSample(true);
     setError("");
     setResult(null);
@@ -1157,20 +1240,30 @@ function WearPrediction({ health }) {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || "Could not load a real dataset sample.");
+        throw new Error(data.error || "Could not load default dataset sample.");
       }
       if (!data.features || data.feature_count !== 50) {
         throw new Error("The API did not return the expected 50 features.");
       }
 
-      setForm(Object.fromEntries(
-        FEATURES.map((feature) => [feature, String(data.features[feature] ?? "")])
-      ));
+      setForm(
+        Object.fromEntries(
+          FEATURES.map((feature) => [feature, String(data.features[feature] ?? "")])
+        )
+      );
+      const hasVB = Number.isFinite(data.measured_VB_mm);
+      setSelectedRecord({
+        case: data.case,
+        run: data.run,
+        measured_VB_mm: data.measured_VB_mm,
+        has_measured_wear: hasVB,
+      });
+      setSelectedKey(`${data.case}-${data.run}`);
       setSampleMessage(
         `Loaded real sensor features · Case ${data.case} · Run ${data.run}` +
-        (Number.isFinite(data.measured_VB_mm)
-          ? ` · Measured VB ${Number(data.measured_VB_mm).toFixed(3)} mm`
-          : "")
+          (hasVB
+            ? ` · Measured VB ${Number(data.measured_VB_mm).toFixed(3)} mm`
+            : " · Unlabelled")
       );
     } catch (loadError) {
       setError(loadError.message);
@@ -1179,20 +1272,32 @@ function WearPrediction({ health }) {
     }
   }
 
+  function handleSelectSample(event) {
+    const key = event.target.value;
+    if (!key) {
+      setSelectedKey("");
+      setSelectedRecord(null);
+      return;
+    }
+    const [c, r] = key.split("-").map(Number);
+    loadSampleByCaseRun(c, r);
+  }
+
   async function submitPrediction(event) {
     event.preventDefault();
     setError("");
     setResult(null);
 
-    const missing = FEATURES.filter((feature) =>
-      form[feature] === "" || !Number.isFinite(Number(form[feature]))
+    const missing = FEATURES.filter(
+      (feature) =>
+        form[feature] === "" || !Number.isFinite(Number(form[feature]))
     );
 
     if (missing.length) {
       setError(
         `Enter valid numeric values for all ${FEATURES.length} features. ` +
-        `Missing or invalid: ${missing.slice(0, 5).join(", ")}` +
-        (missing.length > 5 ? "…" : "")
+          `Missing or invalid: ${missing.slice(0, 5).join(", ")}` +
+          (missing.length > 5 ? "…" : "")
       );
       return;
     }
@@ -1219,7 +1324,11 @@ function WearPrediction({ health }) {
         throw new Error("The API response did not contain a numeric prediction.");
       }
 
-      setResult({ value: predictedValue, raw: data });
+      setResult({
+        value: predictedValue,
+        raw: data,
+        record: selectedRecord ? { ...selectedRecord } : null,
+      });
     } catch (requestError) {
       setError(
         `${requestError.message} Check that Flask is running and /api/predict is available.`
@@ -1229,8 +1338,9 @@ function WearPrediction({ health }) {
     }
   }
 
-  const filledCount = FEATURES.filter((feature) =>
-    form[feature] !== "" && Number.isFinite(Number(form[feature]))
+  const filledCount = FEATURES.filter(
+    (feature) =>
+      form[feature] !== "" && Number.isFinite(Number(form[feature]))
   ).length;
 
   return (
@@ -1258,19 +1368,83 @@ function WearPrediction({ health }) {
         </span>
       </div>
 
-      <section className="panel prediction-intro">
-        <div>
-          <div className="panel-kicker">INPUT SETUP</div>
-          <h2>Configure a prediction</h2>
-          <p>Enter six base statistics and two shape statistics for each sensor, plus DOC and feed.</p>
+      <section className="panel sample-selector-panel">
+        <div className="panel-kicker">DATASET SAMPLE SELECTOR</div>
+        <h2>Load real NASA milling records</h2>
+        <p>
+          Select from {samples.length || "167"} verified experimental records to populate all 50 features and compare model estimates against ground-truth optical wear measurements.
+        </p>
+
+        {samplesError && (
+          <div className="sample-list-error">
+            Unable to load sample catalog: {samplesError}. Default sample loader remains available.
+          </div>
+        )}
+
+        <div className="sample-selector-row">
+          <div className="sample-selector-field">
+            <span>CHOOSE DATASET RECORD (CASE · RUN)</span>
+            <select
+              id="dataset-sample-select"
+              className="sample-select"
+              value={selectedKey}
+              onChange={handleSelectSample}
+              disabled={loadingSample || loadingSamples}
+            >
+              <option value="">
+                {loadingSamples
+                  ? "Loading sample catalog…"
+                  : "Select a record (Case · Run · Measured VB)…"}
+              </option>
+              {samples.map((item) => (
+                <option
+                  key={`${item.case}-${item.run}`}
+                  value={`${item.case}-${item.run}`}
+                >
+                  Case {item.case} · Run {item.run}
+                  {item.has_measured_wear
+                    ? ` (Measured VB: ${Number(item.measured_VB_mm).toFixed(3)} mm)`
+                    : " (Unlabelled / No VB)"}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={loadDefaultSample}
+            disabled={loadingSample}
+          >
+            {loadingSample ? "Loading sample…" : "↧ Load default sample (Case 1 · Run 1)"}
+          </button>
         </div>
-        <button className="secondary-button" type="button" onClick={loadSample} disabled={loadingSample}>
-          {loadingSample ? "Loading sample…" : "↧ Load real dataset sample"}
-        </button>
+
+        {selectedRecord && (
+          <div className="sample-meta">
+            <span className="sample-meta-tag case-run">
+              Case {selectedRecord.case} · Run {selectedRecord.run}
+            </span>
+            {selectedRecord.has_measured_wear ? (
+              <span className="sample-meta-tag vb-label">
+                Actual measured VB: {Number(selectedRecord.measured_VB_mm).toFixed(3)} mm
+              </span>
+            ) : (
+              <span className="sample-meta-tag vb-missing">
+                Actual wear label unavailable (unlabelled run)
+              </span>
+            )}
+          </div>
+        )}
       </section>
 
       {sampleMessage && <div className="success-message">{sampleMessage}</div>}
-      {error && <div className="alert prediction-alert"><strong>Unable to complete request</strong><span>{error}</span></div>}
+      {error && (
+        <div className="alert prediction-alert">
+          <strong>Unable to complete request</strong>
+          <span>{error}</span>
+        </div>
+      )}
 
       <form onSubmit={submitPrediction}>
         {SENSOR_GROUPS.map((group, index) => (
@@ -1331,6 +1505,8 @@ function WearPrediction({ health }) {
           <div>
             <button className="secondary-button" type="button" onClick={() => {
               setForm(Object.fromEntries(FEATURES.map((feature) => [feature, ""])));
+              setSelectedRecord(null);
+              setSelectedKey("");
               setResult(null);
               setError("");
               setSampleMessage("");
@@ -1351,6 +1527,55 @@ function WearPrediction({ health }) {
             <div className="result-value">{result.value.toFixed(4)} <span>mm</span></div>
             <p>Prediction returned by the saved Extra Trees model.</p>
           </div>
+
+          {result.record && (
+            <div className="wear-comparison">
+              <div className="wear-comparison-card">
+                <div className="panel-kicker">DATASET REFERENCE</div>
+                <h3>Actual measured wear (VB)</h3>
+                {result.record.has_measured_wear ? (
+                  <>
+                    <div className="wear-comparison-value">
+                      {Number(result.record.measured_VB_mm).toFixed(4)} <span>mm</span>
+                    </div>
+                    <div className="wear-comparison-note">
+                      Ground-truth optical microscopy measurement from NASA Milling dataset (Case {result.record.case}, Run {result.record.run}).
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="wear-comparison-value" style={{ color: "var(--muted)" }}>
+                      N/A
+                    </div>
+                    <div className="no-vb-message">
+                      Actual wear label unavailable for this record. Prediction can still be explored, but prediction error cannot be calculated.
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="wear-comparison-card">
+                <div className="panel-kicker">MODEL ESTIMATE</div>
+                <h3>Model prediction (VB)</h3>
+                <div className="wear-comparison-value">
+                  {result.value.toFixed(4)} <span>mm</span>
+                </div>
+                <div className="wear-comparison-note">
+                  ExtraTreesRegressor inference from 50 extracted sensor & condition features.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {result.record && result.record.has_measured_wear && (
+            <div className="prediction-error-row">
+              <div className="prediction-error-label">ABSOLUTE PREDICTION ERROR:</div>
+              <div className="prediction-error-value">
+                {Math.abs(result.value - result.record.measured_VB_mm).toFixed(4)} <span>mm</span>
+              </div>
+            </div>
+          )}
+
           <details className="result-details">
             <summary>View API response</summary>
             <pre>{JSON.stringify(result.raw, null, 2)}</pre>
