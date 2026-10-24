@@ -1386,28 +1386,48 @@
 /* Actual vs predicted comparison */
 
 .wear-comparison {
+  grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
   margin-top: 18px;
+  width: 100%;
+}
+
+.wear-comparison.two-cards {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .wear-comparison-card {
-  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 20px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 10px;
+  min-width: 0;
 }
 
 .wear-comparison-card .panel-kicker {
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+}
+
+.wear-comparison-card h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .wear-comparison-value {
-  font-size: clamp(22px, 3vw, 30px);
+  font-size: clamp(22px, 2.8vw, 32px);
   font-weight: 750;
   letter-spacing: -1px;
   font-variant-numeric: tabular-nums;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
 }
 
 .wear-comparison-value span {
@@ -1417,48 +1437,25 @@
   letter-spacing: 0;
 }
 
+.wear-comparison-value.error-highlight {
+  color: var(--accent);
+}
+
 .wear-comparison-note {
-  margin-top: 6px;
+  margin-top: auto;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.6;
 }
 
-.prediction-error-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 14px;
-  padding: 12px 15px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-}
-
-.prediction-error-label {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.8px;
-  white-space: nowrap;
-}
-
-.prediction-error-value {
-  font-size: 15px;
-  font-weight: 750;
-  letter-spacing: -0.5px;
-  font-variant-numeric: tabular-nums;
-}
-
-.prediction-error-value span {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 500;
+.wear-comparison-card.error-card {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
 }
 
 .no-vb-message {
   padding: 11px 13px;
-  margin-top: 14px;
+  margin-top: 10px;
   color: var(--muted);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1467,8 +1464,9 @@
   line-height: 1.7;
 }
 
-@media (max-width: 600px) {
-  .wear-comparison {
+@media (max-width: 860px) {
+  .wear-comparison,
+  .wear-comparison.two-cards {
     grid-template-columns: 1fr;
   }
 

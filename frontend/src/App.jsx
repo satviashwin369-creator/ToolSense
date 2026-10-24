@@ -1529,7 +1529,7 @@ function WearPrediction({ health }) {
           </div>
 
           {result.record && (
-            <div className="wear-comparison">
+            <div className={`wear-comparison ${result.record.has_measured_wear ? "has-error-card" : "two-cards"}`}>
               <div className="wear-comparison-card">
                 <div className="panel-kicker">DATASET REFERENCE</div>
                 <h3>Actual measured wear (VB)</h3>
@@ -1564,15 +1564,19 @@ function WearPrediction({ health }) {
                   ExtraTreesRegressor inference from 50 extracted sensor & condition features.
                 </div>
               </div>
-            </div>
-          )}
 
-          {result.record && result.record.has_measured_wear && (
-            <div className="prediction-error-row">
-              <div className="prediction-error-label">ABSOLUTE PREDICTION ERROR:</div>
-              <div className="prediction-error-value">
-                {Math.abs(result.value - result.record.measured_VB_mm).toFixed(4)} <span>mm</span>
-              </div>
+              {result.record.has_measured_wear && (
+                <div className="wear-comparison-card error-card">
+                  <div className="panel-kicker">PREDICTION ACCURACY</div>
+                  <h3>Absolute error (|Δ|)</h3>
+                  <div className="wear-comparison-value error-highlight">
+                    {Math.abs(result.value - result.record.measured_VB_mm).toFixed(4)} <span>mm</span>
+                  </div>
+                  <div className="wear-comparison-note">
+                    Difference between model estimate and actual measured flank wear for this record.
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
