@@ -1,6 +1,7 @@
 
+
 import { useEffect, useMemo, useState } from "react";
-import { Bar, Scatter } from "react-chartjs-2";
+import { Bar, Line, Scatter } from "react-chartjs-2";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -8,6 +9,9 @@ import {
   PointElement,
   LineElement,
   BarElement,
+  LineController,
+  BarController,
+  ScatterController,
   Tooltip,
   Legend,
 } from "chart.js";
@@ -19,9 +23,14 @@ ChartJS.register(
   PointElement,
   LineElement,
   BarElement,
+  LineController,
+  BarController,
+  ScatterController,
   Tooltip,
   Legend
 );
+
+
 
 const API = "https://toolsense-backend.vercel.app/api";
 const REPORTS = "/reports";
