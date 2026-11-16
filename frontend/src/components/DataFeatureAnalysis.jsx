@@ -64,7 +64,8 @@ export default function DataFeatureAnalysis({ apiBase, reportsBase }) {
           ]);
 
           const parseCsv = (text) => {
-            const lines = text.trim().split("\n");
+            const lines = text.trim().split(/\r?\n/).filter(Boolean);
+            if (!lines.length) return [];
             const headers = lines[0].split(",").map((h) => h.trim());
             return lines.slice(1).map((line) => {
               const vals = line.split(",").map((v) => v.trim());
@@ -199,6 +200,31 @@ export default function DataFeatureAnalysis({ apiBase, reportsBase }) {
         ? highVals
         : values;
 
+    const calc = (arr) => {
+      if (!arr || arr.length === 0) {
+        return { count: 0, mean: 0, std: 0, min: 0, max: 0 };
+      }
+      const m = arr.reduce((a, b) => a + b, 0) / arr.length;
+      const v = arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length;
+      return {
+        count: arr.length,
+        mean: m,
+        std: Math.sqrt(v),
+        min: Math.min(...arr),
+        max: Math.max(...arr),
+      };
+    };
+
+    const stats = {
+      overall: calc(values),
+      lowWear: calc(lowVals),
+      highWear: calc(highVals),
+    };
+
+    if (!targetVals || targetVals.length === 0) {
+      return { featureStats: stats, histData: null };
+    }
+
     // Build 12 histogram bins
     const minVal = Math.min(...targetVals);
     const maxVal = Math.max(...targetVals);
@@ -220,25 +246,8 @@ export default function DataFeatureAnalysis({ apiBase, reportsBase }) {
       bins[bIdx]++;
     });
 
-    const calc = (arr) => {
-      if (arr.length === 0) return { mean: 0, std: 0, min: 0, max: 0 };
-      const m = arr.reduce((a, b) => a + b, 0) / arr.length;
-      const v = arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length;
-      return {
-        count: arr.length,
-        mean: m,
-        std: Math.sqrt(v),
-        min: Math.min(...arr),
-        max: Math.max(...arr),
-      };
-    };
-
     return {
-      featureStats: {
-        overall: calc(values),
-        lowWear: calc(lowVals),
-        highWear: calc(highVals),
-      },
+      featureStats: stats,
       histData: {
         labels: binLabels,
         datasets: [

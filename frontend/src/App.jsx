@@ -1,14 +1,8 @@
 
-import { useEffect, useState } from "react";
+import { Component, useEffect, useState } from "react";
 import {
   Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  BarElement,
-  Tooltip,
-  Legend,
+  registerables,
 } from "chart.js";
 
 import AlgorithmComparison from "./components/AlgorithmComparison";
@@ -16,15 +10,43 @@ import DataFeatureAnalysis from "./components/DataFeatureAnalysis";
 import InteractivePrediction from "./components/InteractivePrediction";
 import "./App.css";
 
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  BarElement,
-  Tooltip,
-  Legend
-);
+// Register all Chart.js controllers (bar, line, scatter, etc.), scales, and elements
+ChartJS.register(...registerables);
+
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error("ToolSense Dashboard caught an error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="section-error" style={{ margin: "2rem auto", maxWidth: "680px" }}>
+          <h3 style={{ color: "#f43f5e", marginBottom: "0.5rem" }}>Rendering Error Detected</h3>
+          <p style={{ color: "var(--text-muted)", marginBottom: "1rem" }}>
+            {this.state.error?.message || "An unexpected error occurred while rendering this page."}
+          </p>
+          <button
+            className="btn-filter active"
+            onClick={() => this.setState({ hasError: false, error: null })}
+          >
+            Retry View
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // In local dev, point directly to the Flask backend; fallback gracefully
 const API_BASE = "http://127.0.0.1:5000/api";
@@ -164,17 +186,19 @@ export default function App() {
 
         {/* Dynamic Section Content */}
         <main className="app-content">
-          {activeSection === "algorithms" && (
-            <AlgorithmComparison apiBase={API_BASE} reportsBase={REPORTS_BASE} />
-          )}
+          <ErrorBoundary>
+            {activeSection === "algorithms" && (
+              <AlgorithmComparison apiBase={API_BASE} reportsBase={REPORTS_BASE} />
+            )}
 
-          {activeSection === "data_analysis" && (
-            <DataFeatureAnalysis apiBase={API_BASE} reportsBase={REPORTS_BASE} />
-          )}
+            {activeSection === "data_analysis" && (
+              <DataFeatureAnalysis apiBase={API_BASE} reportsBase={REPORTS_BASE} />
+            )}
 
-          {activeSection === "prediction" && (
-            <InteractivePrediction apiBase={API_BASE} reportsBase={REPORTS_BASE} />
-          )}
+            {activeSection === "prediction" && (
+              <InteractivePrediction apiBase={API_BASE} reportsBase={REPORTS_BASE} />
+            )}
+          </ErrorBoundary>
         </main>
       </div>
     </div>
