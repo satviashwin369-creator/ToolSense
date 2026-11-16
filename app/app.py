@@ -6,6 +6,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+import pandas as pd
 from flask import Flask, jsonify, request
 from scipy.io import loadmat
 from scipy.stats import kurtosis, skew
@@ -19,6 +20,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 MODEL_PATH = ROOT / "models" / "toolsense_model_candidate.joblib"
 METRICS_PATH = ROOT / "reports" / "candidate_model_metrics.json"
+ALGO_PATH = ROOT / "reports" / "algorithm_comparison.csv"
+SHAPE_PATH = ROOT / "reports" / "shape_feature_comparison.csv"
+IMPORTANCE_PATH = ROOT / "reports" / "candidate_feature_importance.csv"
+PREDICTIONS_PATH = ROOT / "reports" / "candidate_model_predictions.csv"
+FEATURE_DATASET_PATH = ROOT / "data" / "processed" / "feature_dataset.csv"
 MAT_PATH = ROOT / "data" / "raw" / "mill.mat"
 SAMPLE_PATH = ROOT / "data" / "processed" / "deployment_sample.json"
 SAMPLES_PATH = ROOT / "data" / "processed" / "deployment_samples.json"
@@ -48,7 +54,7 @@ app = Flask(__name__)
 # --------------------------------------------------
 
 def allowed_origins():
-    origins = {"http://localhost:5173"}
+    origins = {"http://localhost:5173", "http://127.0.0.1:5173"}
     configured_origin = os.environ.get("FRONTEND_ORIGIN", "").strip()
 
     if configured_origin:
@@ -105,6 +111,25 @@ except Exception as exc:
     model = None
     FEATURES = []
     MODEL_LOAD_ERROR = str(exc)
+
+
+# --------------------------------------------------
+# Out-of-fold predictions lookup table
+# --------------------------------------------------
+
+_oof_lookup = {}
+if PREDICTIONS_PATH.exists():
+    try:
+        df_preds = pd.read_csv(PREDICTIONS_PATH)
+        for _, row in df_preds.iterrows():
+            _oof_lookup[(int(row["case"]), int(row["run"]))] = {
+                "VB": float(row["VB"]),
+                "predicted_VB": float(row["predicted_VB"]),
+                "signed_error_mm": float(row["signed_error_mm"]),
+                "absolute_error_mm": float(row["absolute_error_mm"]),
+            }
+    except Exception:
+        _oof_lookup = {}
 
 
 # --------------------------------------------------
@@ -193,19 +218,43 @@ def load_raw_records():
 
 def make_sample_response(record):
     features = extract_features(record)
+    case_num = int(scalar_from_record(record, "case"))
+    run_num = int(scalar_from_record(record, "run"))
+    measured_vb = scalar_from_record(record, "VB")
 
-    return {
-        "case": int(scalar_from_record(record, "case")),
-        "run": int(scalar_from_record(record, "run")),
+    resp = {
+        "case": case_num,
+        "run": run_num,
         "feature_count": len(features),
         "features": features,
-        "measured_VB_mm": scalar_from_record(record, "VB"),
+        "measured_VB_mm": measured_vb,
+        "DOC": features.get("DOC"),
+        "feed": features.get("feed"),
         "notice": (
             "Features were calculated from the original sensor signals. "
             "Measured VB is reference information, not an input feature."
         ),
         "source": "data/raw/mill.mat",
     }
+
+    # Attach OOF prediction if available
+    oof = _oof_lookup.get((case_num, run_num))
+    if oof:
+        resp["oof_prediction"] = {
+            "predicted_VB_mm": oof["predicted_VB"],
+            "absolute_error_mm": oof["absolute_error_mm"],
+            "signed_error_mm": oof["signed_error_mm"],
+            "is_oof": True,
+            "wear_category": (
+                "High Wear" if oof["VB"] > HIGH_WEAR_THRESHOLD_MM else "Low Wear"
+            ),
+            "predicted_wear_category": (
+                "High Wear"
+                if oof["predicted_VB"] >= HIGH_WEAR_THRESHOLD_MM
+                else "Low Wear"
+            ),
+        }
+    return resp
 
 
 def load_saved_deployment_sample():
@@ -233,6 +282,27 @@ def load_saved_deployment_sample():
             raise ValueError(f"Feature '{name}' must be finite.")
 
     sample["feature_count"] = len(features)
+    sample["DOC"] = features.get("DOC")
+    sample["feed"] = features.get("feed")
+
+    case_run = (int(sample["case"]), int(sample["run"]))
+    if case_run in _oof_lookup:
+        oof = _oof_lookup[case_run]
+        sample["oof_prediction"] = {
+            "predicted_VB_mm": oof["predicted_VB"],
+            "absolute_error_mm": oof["absolute_error_mm"],
+            "signed_error_mm": oof["signed_error_mm"],
+            "is_oof": True,
+            "wear_category": (
+                "High Wear" if oof["VB"] > HIGH_WEAR_THRESHOLD_MM else "Low Wear"
+            ),
+            "predicted_wear_category": (
+                "High Wear"
+                if oof["predicted_VB"] >= HIGH_WEAR_THRESHOLD_MM
+                else "Low Wear"
+            ),
+        }
+
     return sample
 
 
@@ -259,7 +329,7 @@ _cached_deployment_samples = None
 
 
 def load_saved_deployment_samples():
-    """Load and cache the multi-sample deployment file."""
+    """Load and cache the multi-sample deployment file with OOF metadata."""
     global _cached_deployment_samples
 
     if _cached_deployment_samples is not None:
@@ -283,6 +353,30 @@ def load_saved_deployment_samples():
     for sample in data:
         validate_deployment_sample(sample)
         sample["feature_count"] = len(sample["features"])
+        sample["DOC"] = sample["features"].get("DOC")
+        sample["feed"] = sample["features"].get("feed")
+
+        case_run = (int(sample["case"]), int(sample["run"]))
+        if case_run in _oof_lookup:
+            oof = _oof_lookup[case_run]
+            sample["oof_prediction"] = {
+                "predicted_VB_mm": oof["predicted_VB"],
+                "absolute_error_mm": oof["absolute_error_mm"],
+                "signed_error_mm": oof["signed_error_mm"],
+                "is_oof": True,
+                "wear_category": (
+                    "High Wear"
+                    if oof["VB"] > HIGH_WEAR_THRESHOLD_MM
+                    else "Low Wear"
+                ),
+                "predicted_wear_category": (
+                    "High Wear"
+                    if oof["predicted_VB"] >= HIGH_WEAR_THRESHOLD_MM
+                    else "Low Wear"
+                ),
+            }
+        else:
+            sample["oof_prediction"] = None
 
     _cached_deployment_samples = data
     return data
@@ -329,12 +423,409 @@ def metrics():
 
 
 # --------------------------------------------------
+# Section B: Algorithm Comparison
+# --------------------------------------------------
+
+@app.route("/api/algorithm-comparison", methods=["GET"])
+def algorithm_comparison():
+    if not ALGO_PATH.exists():
+        return (
+            jsonify({"error": "Algorithm comparison data file is unavailable."}),
+            503,
+        )
+
+    try:
+        df_algo = pd.read_csv(ALGO_PATH)
+        models = []
+        for _, row in df_algo.iterrows():
+            models.append({
+                "model": str(row["Model"]),
+                "feature_count": int(row["Feature_count"]),
+                "MAE_mm": float(row["MAE_mm"]),
+                "RMSE_mm": float(row["RMSE_mm"]),
+                "R2": float(row["R2"]),
+                "high_wear_count": int(row["High_wear_count"]),
+                "high_wear_MAE_mm": float(row["High_wear_MAE_mm"]),
+            })
+
+        # Feature engineering comparison (shape features)
+        feature_comparison = []
+        if SHAPE_PATH.exists():
+            df_shape = pd.read_csv(SHAPE_PATH)
+            name_map = {
+                "Baseline_38": "Baseline (38 features)",
+                "Baseline_plus_shape_50": "Baseline + Skewness & Kurtosis (50 features)",
+                "Shape_plus_all_conditions_51": "Shape + All Conditions (51 features)",
+            }
+            for _, row in df_shape.iterrows():
+                feature_comparison.append({
+                    "key": str(row["Model"]),
+                    "name": name_map.get(str(row["Model"]), str(row["Model"])),
+                    "feature_count": int(row["Feature_count"]),
+                    "MAE_mm": float(row["MAE_mm"]),
+                    "RMSE_mm": float(row["RMSE_mm"]),
+                    "R2": float(row["R2"]),
+                    "high_wear_count": int(row["High_wear_count"]),
+                    "high_wear_MAE_mm": float(row["High_wear_MAE_mm"]),
+                    "high_wear_signed_error_mm": (
+                        float(row["High_wear_signed_error_mm"])
+                        if "High_wear_signed_error_mm" in row and pd.notna(row["High_wear_signed_error_mm"])
+                        else None
+                    ),
+                })
+
+        # Final candidate metrics
+        final_candidate = None
+        if METRICS_PATH.exists():
+            final_candidate = json.loads(METRICS_PATH.read_text(encoding="utf-8"))
+
+        best_mae_model = min(models, key=lambda m: m["MAE_mm"])["model"]
+        best_rmse_model = min(models, key=lambda m: m["RMSE_mm"])["model"]
+        best_r2_model = max(models, key=lambda m: m["R2"])["model"]
+
+        return jsonify({
+            "baseline_models": models,
+            "feature_comparison": feature_comparison,
+            "final_candidate": final_candidate,
+            "best_indicators": {
+                "lowest_mae": best_mae_model,
+                "lowest_rmse": best_rmse_model,
+                "highest_r2": best_r2_model,
+            },
+            "validation_method": "5-fold GroupKFold by machining case (unseen case evaluation)",
+            "explanation": {
+                "problem_type": "Regression (continuous cutting-tool flank wear VB in mm)",
+                "metric_definitions": {
+                    "MAE": "Mean Absolute Error in millimetres. Direct average distance between predicted wear and actual physical wear. Lower is better.",
+                    "RMSE": "Root Mean Squared Error in millimetres. Penalizes large prediction errors more severely. Lower is better.",
+                    "R2": "Coefficient of determination (fraction of target variance explained by model). Higher is better. This is NOT an accuracy percentage.",
+                },
+                "why_extra_trees": (
+                    "Extra Trees (Extremely Randomized Trees) randomizes split thresholds in addition to feature subsets. "
+                    "This randomization significantly dampens variance and noise present in dynamic CNC cutting signals "
+                    "(spindle vibration and acoustic emissions), providing the best generalization across machining cases."
+                ),
+            },
+        }), 200
+
+    except Exception as exc:
+        return jsonify({
+            "error": "Failed to load algorithm comparison data",
+            "detail": str(exc),
+        }), 500
+
+
+# --------------------------------------------------
+# Section C: Data & Feature Analysis
+# --------------------------------------------------
+
+@app.route("/api/dataset-overview", methods=["GET"])
+def dataset_overview():
+    try:
+        samples = load_saved_deployment_samples()
+        total_records = len(samples)
+
+        measured_vbs = [
+            s["measured_VB_mm"]
+            for s in samples
+            if s["measured_VB_mm"] is not None and math.isfinite(s["measured_VB_mm"])
+        ]
+        valid_count = len(measured_vbs)
+        missing_count = total_records - valid_count
+
+        vbs_array = np.array(measured_vbs, dtype=float)
+        low_wear_count = int(np.sum(vbs_array <= HIGH_WEAR_THRESHOLD_MM))
+        high_wear_count = int(np.sum(vbs_array > HIGH_WEAR_THRESHOLD_MM))
+
+        cases = sorted(list({s["case"] for s in samples}))
+
+        return jsonify({
+            "total_records": total_records,
+            "valid_vb_count": valid_count,
+            "missing_vb_count": missing_count,
+            "sensor_channel_count": len(SENSORS),
+            "sensor_channels": SENSORS,
+            "feature_count": EXPECTED_FEATURE_COUNT,
+            "feature_breakdown": {
+                "basic_sensor_statistics": 36,
+                "shape_sensor_statistics": 12,
+                "machining_conditions": 2,
+            },
+            "vb_statistics": {
+                "unit": "mm",
+                "min": float(np.min(vbs_array)),
+                "max": float(np.max(vbs_array)),
+                "mean": float(np.mean(vbs_array)),
+                "median": float(np.median(vbs_array)),
+                "std": float(np.std(vbs_array)),
+            },
+            "high_wear_threshold_mm": HIGH_WEAR_THRESHOLD_MM,
+            "threshold_notice": (
+                "0.50 mm is the analytical high-wear threshold established in this "
+                "research project, not a universal industrial wear limit."
+            ),
+            "low_wear_count": low_wear_count,
+            "high_wear_count": high_wear_count,
+            "cases": cases,
+            "case_count": len(cases),
+        }), 200
+
+    except Exception as exc:
+        return jsonify({
+            "error": "Failed to generate dataset overview",
+            "detail": str(exc),
+        }), 500
+
+
+@app.route("/api/feature-importance", methods=["GET"])
+def feature_importance():
+    if not IMPORTANCE_PATH.exists():
+        return jsonify({"error": "Feature importance file is unavailable."}), 503
+
+    try:
+        df_imp = pd.read_csv(IMPORTANCE_PATH)
+
+        def categorize(feat):
+            if feat in ["DOC", "feed"]:
+                return "machining_conditions", "condition"
+            for sensor in SENSORS:
+                if feat.startswith(sensor + "_"):
+                    stat = feat[len(sensor) + 1:]
+                    return sensor, (
+                        "shape" if stat in ["skewness", "kurtosis"] else "basic_statistic"
+                    )
+            return "other", "other"
+
+        items = []
+        for _, row in df_imp.iterrows():
+            sensor, stat_type = categorize(row["feature"])
+            items.append({
+                "rank": int(row["rank"]),
+                "feature": str(row["feature"]),
+                "importance": float(row["importance"]),
+                "importance_percent": float(row["importance_percent"]),
+                "sensor": sensor,
+                "stat_type": stat_type,
+            })
+
+        sensor_totals = {}
+        type_totals = {}
+        for item in items:
+            s = item["sensor"]
+            t = item["stat_type"]
+            sensor_totals[s] = sensor_totals.get(s, 0.0) + item["importance_percent"]
+            type_totals[t] = type_totals.get(t, 0.0) + item["importance_percent"]
+
+        sensor_ranking = [
+            {"sensor": s, "importance_percent": round(pct, 2)}
+            for s, pct in sorted(sensor_totals.items(), key=lambda x: x[1], reverse=True)
+        ]
+
+        type_ranking = [
+            {"type": t, "importance_percent": round(pct, 2)}
+            for t, pct in sorted(type_totals.items(), key=lambda x: x[1], reverse=True)
+        ]
+
+        return jsonify({
+            "total_features": len(items),
+            "features": items,
+            "top_10": items[:10],
+            "sensor_group_importance": sensor_ranking,
+            "type_group_importance": type_ranking,
+            "notice": (
+                "Feature importance reflects impurity reduction within the Extra Trees decision splits. "
+                "It indicates model reliance and sensitivity, not physical causation."
+            ),
+        }), 200
+
+    except Exception as exc:
+        return jsonify({
+            "error": "Failed to load feature importance",
+            "detail": str(exc),
+        }), 500
+
+
+@app.route("/api/dataset-distributions", methods=["GET"])
+def dataset_distributions():
+    try:
+        samples = load_saved_deployment_samples()
+        feature_name = request.args.get("feature", "VB").strip()
+        wear_filter = request.args.get("wear_category", "all").strip().lower()
+
+        all_values = []
+        low_wear_values = []
+        high_wear_values = []
+
+        for s in samples:
+            vb = s.get("measured_VB_mm")
+            if feature_name == "VB":
+                val = vb
+            else:
+                val = s.get("features", {}).get(feature_name)
+
+            if val is not None and math.isfinite(val):
+                all_values.append(val)
+                if vb is not None and math.isfinite(vb):
+                    if vb <= HIGH_WEAR_THRESHOLD_MM:
+                        low_wear_values.append(val)
+                    else:
+                        high_wear_values.append(val)
+
+        if not all_values:
+            return jsonify({"error": f"Feature '{feature_name}' not found."}), 404
+
+        target_values = all_values
+        if wear_filter == "low":
+            target_values = low_wear_values
+        elif wear_filter == "high":
+            target_values = high_wear_values
+
+        counts, bin_edges = np.histogram(target_values, bins=14)
+        histogram = []
+        for i in range(len(counts)):
+            histogram.append({
+                "bin_start": float(bin_edges[i]),
+                "bin_end": float(bin_edges[i + 1]),
+                "count": int(counts[i]),
+                "label": f"{bin_edges[i]:.2f}-{bin_edges[i+1]:.2f}",
+            })
+
+        def calc_stats(arr):
+            if not arr:
+                return None
+            a = np.array(arr)
+            return {
+                "count": len(a),
+                "min": float(np.min(a)),
+                "max": float(np.max(a)),
+                "mean": float(np.mean(a)),
+                "median": float(np.median(a)),
+                "std": float(np.std(a)),
+                "q25": float(np.percentile(a, 25)),
+                "q75": float(np.percentile(a, 75)),
+            }
+
+        return jsonify({
+            "feature": feature_name,
+            "wear_filter": wear_filter,
+            "histogram": histogram,
+            "overall_stats": calc_stats(all_values),
+            "low_wear_stats": calc_stats(low_wear_values),
+            "high_wear_stats": calc_stats(high_wear_values),
+            "low_wear_count": len(low_wear_values),
+            "high_wear_count": len(high_wear_values),
+        }), 200
+
+    except Exception as exc:
+        return jsonify({
+            "error": "Failed to calculate distribution",
+            "detail": str(exc),
+        }), 500
+
+
+# --------------------------------------------------
+# Section D: Predictions and Out-Of-Fold Analysis
+# --------------------------------------------------
+
+@app.route("/api/predictions", methods=["GET"])
+def predictions():
+    if not PREDICTIONS_PATH.exists():
+        return jsonify({"error": "Predictions file is unavailable."}), 503
+
+    try:
+        df_preds = pd.read_csv(PREDICTIONS_PATH)
+
+        records = []
+        for _, row in df_preds.iterrows():
+            records.append({
+                "case": int(row["case"]),
+                "run": int(row["run"]),
+                "VB": float(row["VB"]),
+                "predicted_VB": float(row["predicted_VB"]),
+                "signed_error_mm": float(row["signed_error_mm"]),
+                "absolute_error_mm": float(row["absolute_error_mm"]),
+                "wear_category": (
+                    "High Wear" if row["VB"] > HIGH_WEAR_THRESHOLD_MM else "Low Wear"
+                ),
+                "predicted_category": (
+                    "High Wear" if row["predicted_VB"] >= HIGH_WEAR_THRESHOLD_MM else "Low Wear"
+                ),
+            })
+
+        y_true = df_preds["VB"].to_numpy()
+        y_pred = df_preds["predicted_VB"].to_numpy()
+        abs_err = df_preds["absolute_error_mm"].to_numpy()
+        signed_err = df_preds["signed_error_mm"].to_numpy()
+
+        low_mask = y_true <= HIGH_WEAR_THRESHOLD_MM
+        high_mask = y_true > HIGH_WEAR_THRESHOLD_MM
+
+        ranges = [
+            ("0.0 - 0.2 mm", (y_true >= 0.0) & (y_true < 0.2)),
+            ("0.2 - 0.4 mm", (y_true >= 0.2) & (y_true < 0.4)),
+            ("0.4 - 0.6 mm", (y_true >= 0.4) & (y_true < 0.6)),
+            (">= 0.6 mm", y_true >= 0.6),
+        ]
+        wear_range_stats = []
+        for label, mask in ranges:
+            sub_abs = abs_err[mask]
+            wear_range_stats.append({
+                "range": label,
+                "record_count": int(np.sum(mask)),
+                "MAE_mm": float(np.mean(sub_abs)) if len(sub_abs) > 0 else 0.0,
+            })
+
+        res_counts, res_edges = np.histogram(signed_err, bins=14)
+        residual_hist = []
+        for i in range(len(res_counts)):
+            residual_hist.append({
+                "bin_start": float(res_edges[i]),
+                "bin_end": float(res_edges[i + 1]),
+                "count": int(res_counts[i]),
+                "label": f"{res_edges[i]:.2f} to {res_edges[i+1]:.2f}",
+            })
+
+        return jsonify({
+            "total_records": len(records),
+            "evaluation_type": "5-fold GroupKFold by machining case (genuine out-of-fold predictions)",
+            "overall": {
+                "MAE_mm": float(np.mean(abs_err)),
+                "RMSE_mm": float(np.sqrt(np.mean(signed_err ** 2))),
+                "R2": float(
+                    1 - np.sum(signed_err ** 2) / np.sum((y_true - np.mean(y_true)) ** 2)
+                ),
+            },
+            "low_wear": {
+                "count": int(np.sum(low_mask)),
+                "MAE_mm": float(np.mean(abs_err[low_mask])),
+                "RMSE_mm": float(np.sqrt(np.mean(signed_err[low_mask] ** 2))),
+                "mean_signed_error_mm": float(np.mean(signed_err[low_mask])),
+            },
+            "high_wear": {
+                "count": int(np.sum(high_mask)),
+                "MAE_mm": float(np.mean(abs_err[high_mask])),
+                "RMSE_mm": float(np.sqrt(np.mean(signed_err[high_mask] ** 2))),
+                "mean_signed_error_mm": float(np.mean(signed_err[high_mask])),
+            },
+            "wear_range_analysis": wear_range_stats,
+            "residual_distribution": residual_hist,
+            "records": records,
+        }), 200
+
+    except Exception as exc:
+        return jsonify({
+            "error": "Failed to load predictions",
+            "detail": str(exc),
+        }), 500
+
+
+# --------------------------------------------------
 # Sample
 # --------------------------------------------------
 
 @app.route("/api/samples", methods=["GET"])
 def samples_list():
-    """Return metadata for all available deployment samples."""
+    """Return metadata for all available deployment samples with OOF data."""
     try:
         all_samples = load_saved_deployment_samples()
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
@@ -346,12 +837,28 @@ def samples_list():
 
     records = []
     for s in all_samples:
-        records.append({
+        rec = {
             "case": s["case"],
             "run": s["run"],
             "measured_VB_mm": s["measured_VB_mm"],
             "has_measured_wear": s["measured_VB_mm"] is not None,
-        })
+            "DOC": s.get("DOC"),
+            "feed": s.get("feed"),
+        }
+        if s.get("oof_prediction"):
+            rec["predicted_VB_mm"] = s["oof_prediction"]["predicted_VB_mm"]
+            rec["absolute_error_mm"] = s["oof_prediction"]["absolute_error_mm"]
+            rec["signed_error_mm"] = s["oof_prediction"]["signed_error_mm"]
+            rec["wear_category"] = s["oof_prediction"]["wear_category"]
+            rec["is_out_of_fold"] = True
+        else:
+            rec["predicted_VB_mm"] = None
+            rec["absolute_error_mm"] = None
+            rec["signed_error_mm"] = None
+            rec["wear_category"] = "Unmeasured"
+            rec["is_out_of_fold"] = False
+
+        records.append(rec)
 
     return jsonify({
         "count": len(records),
@@ -361,14 +868,12 @@ def samples_list():
 
 @app.route("/api/sample", methods=["GET"])
 def sample():
-    # Support case/run query parameters for specific record selection
     requested_case = request.args.get("case")
     requested_run = request.args.get("run")
 
     if requested_case is not None or requested_run is not None:
         return _get_selected_sample(requested_case, requested_run)
 
-    # Original default behaviour: return case 1, run 1
     if MAT_PATH.exists():
         try:
             for record in load_raw_records():
@@ -405,7 +910,6 @@ def sample():
 
 def _get_selected_sample(raw_case, raw_run):
     """Return a specific sample identified by case and run."""
-    # Validate parameters
     if raw_case is None or raw_run is None:
         return jsonify({
             "error": "Both 'case' and 'run' query parameters are required.",
@@ -419,7 +923,6 @@ def _get_selected_sample(raw_case, raw_run):
             "error": "'case' and 'run' must be integers.",
         }), 400
 
-    # Try deployment samples first (works on Vercel)
     try:
         all_samples = load_saved_deployment_samples()
         for s in all_samples:
@@ -431,9 +934,8 @@ def _get_selected_sample(raw_case, raw_run):
         }), 404
 
     except (FileNotFoundError, RuntimeError, ValueError):
-        pass  # Fall through to raw dataset
+        pass
 
-    # Fall back to raw dataset extraction
     if MAT_PATH.exists():
         try:
             for record in load_raw_records():
@@ -460,7 +962,7 @@ def _get_selected_sample(raw_case, raw_run):
 
 
 # --------------------------------------------------
-# Prediction
+# Prediction (Live inference endpoint)
 # --------------------------------------------------
 
 @app.route("/api/predict", methods=["POST"])

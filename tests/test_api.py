@@ -243,3 +243,100 @@ def test_default_sample_still_works(client):
 
     assert data["feature_count"] == 50
     assert isinstance(data["features"], dict)
+
+
+def test_algorithm_comparison_endpoint(client):
+    response = client.get("/api/algorithm-comparison")
+    assert response.status_code == 200
+    data = response.get_json()
+
+    assert "baseline_models" in data
+    assert len(data["baseline_models"]) == 4
+    model_names = [m["model"] for m in data["baseline_models"]]
+    assert "Extra Trees" in model_names
+    assert "Random Forest" in model_names
+    assert "Gradient Boosting" in model_names
+    assert "Histogram Gradient Boosting" in model_names
+
+    # Check metrics values match reported values
+    et = next(m for m in data["baseline_models"] if m["model"] == "Extra Trees")
+    assert round(et["MAE_mm"], 4) == 0.1328
+    assert round(et["RMSE_mm"], 4) == 0.2019
+    assert round(et["R2"], 4) == 0.3952
+
+    assert "feature_comparison" in data
+    assert len(data["feature_comparison"]) == 3
+    assert data["feature_comparison"][0]["feature_count"] == 38
+    assert data["feature_comparison"][1]["feature_count"] == 50
+
+    assert "final_candidate" in data
+    assert data["final_candidate"]["feature_count"] == 50
+    assert "explanation" in data
+
+
+def test_dataset_overview_endpoint(client):
+    response = client.get("/api/dataset-overview")
+    assert response.status_code == 200
+    data = response.get_json()
+
+    assert data["total_records"] == 167
+    assert data["valid_vb_count"] == 146
+    assert data["missing_vb_count"] == 21
+    assert data["sensor_channel_count"] == 6
+    assert data["feature_count"] == 50
+    assert data["low_wear_count"] == 118
+    assert data["high_wear_count"] == 28
+    assert data["vb_statistics"]["min"] == 0.0
+    assert data["vb_statistics"]["max"] == 1.53
+
+
+def test_feature_importance_endpoint(client):
+    response = client.get("/api/feature-importance")
+    assert response.status_code == 200
+    data = response.get_json()
+
+    assert data["total_features"] == 50
+    assert len(data["top_10"]) == 10
+    assert data["top_10"][0]["feature"] == "AE_spindle_maximum"
+    assert round(data["top_10"][0]["importance"], 4) == 0.1394
+    assert data["top_10"][1]["feature"] == "vib_spindle_skewness"
+    assert round(data["top_10"][1]["importance"], 4) == 0.1375
+
+    assert "sensor_group_importance" in data
+    assert "type_group_importance" in data
+
+
+def test_dataset_distributions_endpoint(client):
+    response = client.get("/api/dataset-distributions?feature=VB")
+    assert response.status_code == 200
+    data = response.get_json()
+
+    assert data["feature"] == "VB"
+    assert "histogram" in data
+    assert len(data["histogram"]) > 0
+    assert data["low_wear_count"] == 118
+    assert data["high_wear_count"] == 28
+
+    # Specific sensor feature
+    response_sensor = client.get("/api/dataset-distributions?feature=AE_spindle_maximum")
+    assert response_sensor.status_code == 200
+    sensor_data = response_sensor.get_json()
+    assert sensor_data["feature"] == "AE_spindle_maximum"
+    assert "overall_stats" in sensor_data
+
+
+def test_predictions_endpoint(client):
+    response = client.get("/api/predictions")
+    assert response.status_code == 200
+    data = response.get_json()
+
+    assert data["total_records"] == 146
+    assert "overall" in data
+    assert round(data["overall"]["MAE_mm"], 4) == 0.1260
+    assert "low_wear" in data
+    assert data["low_wear"]["count"] == 118
+    assert "high_wear" in data
+    assert data["high_wear"]["count"] == 28
+    assert "wear_range_analysis" in data
+    assert "residual_distribution" in data
+    assert len(data["records"]) == 146
